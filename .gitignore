@@ -3,6 +3,7 @@ datasets/
 pretrained/
 outputs/
 runs/
+tmp
 wandb/
 __pycache__/
 *.pyc

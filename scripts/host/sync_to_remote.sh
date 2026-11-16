@@ -2,7 +2,7 @@
 # Push this local shadow copy -> remote compute host (training/inference).
 set -euo pipefail
 
-ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 REMOTE_HOST="${REMOTE_HOST:-user@your-gpu-host}"
 REMOTE_PATH="${REMOTE_PATH:-/path/to/realtime_3dvision}"
 
