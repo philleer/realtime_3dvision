@@ -116,15 +116,20 @@ def resize_depth_to_rgb(depth: np.ndarray, wh: tuple[int, int]) -> np.ndarray:
     return cv2.resize(depth, (w, h), interpolation=cv2.INTER_NEAREST)
 
 
-def metricize_with_gt(pred_m: np.ndarray, gt_path: Path, rgb_wh: tuple[int, int]) -> np.ndarray:
+def metricize_with_gt(pred_m: np.ndarray, gt_path: Path, rgb_wh: tuple[int, int]) -> tuple[np.ndarray, str]:
+    """Align relative Depth-Anything output to GT metres (handles disparity-like maps)."""
     gt, _ = load_depth(gt_path, "auto")
     gt = resize_depth_to_rgb(gt, rgb_wh)
     pred = resize_depth_to_rgb(pred_m, rgb_wh)
-    valid = (gt > 0.05) & (gt < 8.0) & np.isfinite(pred) & (pred > 1e-6)
+    valid = (gt > 0.2) & (gt < 5.0) & np.isfinite(pred) & (pred > 1e-3)
     if valid.sum() < 100:
-        return pred
+        return pred, "relative(unscaled)"
+    corr = float(np.corrcoef(pred[valid], gt[valid])[0, 1])
+    if corr < 0.0:
+        scale = float(np.median(gt[valid] * pred[valid]))
+        return scale / np.clip(pred, 1e-6, None), f"m(disp/gt,corr={corr:.2f})"
     scale = float(np.median(gt[valid] / pred[valid]))
-    return pred * scale
+    return pred * scale, f"m(depth*s,corr={corr:.2f})"
 
 
 def find_depth(depth_dir: Path, stem: str) -> Path:
@@ -375,8 +380,7 @@ def main() -> None:
             if args.metricize_gt:
                 gt = args.gt_depth_dir / f"{rgb_path.stem}.png"
                 if gt.is_file():
-                    depth = metricize_with_gt(depth, gt, (w, h))
-                    unit = "m(scaled-to-gt)"
+                    depth, unit = metricize_with_gt(depth, gt, (w, h))
                 else:
                     unit = "relative*scale"
             else:
