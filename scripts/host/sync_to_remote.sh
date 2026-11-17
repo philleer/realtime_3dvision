@@ -15,7 +15,7 @@ RSYNC_EXCLUDES=(
   --exclude '*.pyc'
   --exclude '.pytest_cache/'
   --exclude '.mypy_cache/'
-  --exclude 'outputs/'
+  --exclude 'tmp/'
   --exclude 'runs/'
   --exclude 'wandb/'
 )

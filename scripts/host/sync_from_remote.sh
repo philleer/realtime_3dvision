@@ -6,7 +6,7 @@ ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 REMOTE_HOST="${REMOTE_HOST:-user@your-gpu-host}"
 REMOTE_PATH="${REMOTE_PATH:-/path/to/realtime_3dvision}"
 
-# Pull code + experiment outputs by default; use --all for data/pretrained too.
+# Pull code + tmp inference artifacts by default; use --all for data/pretrained too.
 MODE="${1:-results}"
 
 RSYNC_EXCLUDES=(
@@ -19,9 +19,9 @@ RSYNC_EXCLUDES=(
 
 case "$MODE" in
   results)
-    # Only bring back common training/inference products + source edits.
+    # Only bring back inference/viz products under tmp/ + source edits.
     rsync -avh --info=stats2 "${RSYNC_EXCLUDES[@]}" \
-      --include 'outputs/***'/ \
+      --include 'tmp/***'/ \
       --include 'runs/***'/ \
       --include 'configs/***'/ \
       --include 'scripts/***'/ \

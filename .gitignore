@@ -1,9 +1,8 @@
 data/
 datasets/
 pretrained/
-outputs/
 runs/
-tmp
+tmp/
 wandb/
 __pycache__/
 *.pyc
@@ -13,3 +12,4 @@ __pycache__/
 *.pth
 *.bin
 *.ply
+third_party/
