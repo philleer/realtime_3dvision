@@ -2,7 +2,7 @@
 
 室内实时三维视觉原型：RGB 实例分割 + 单目深度 → 点云 / 俯视 BEV。
 
-- **算力**：远端 GPU（`your-gpu-host`）跑推理；本机影子仓编辑，`scripts/host/sync_*.sh` 同步
+- **算力**：远端 GPU 跑推理；本机影子仓编辑，经 `scripts/host/sync_*.sh` 同步（主机写在本地 `.remote_host`，不入库）
 - **环境**：`conda activate yolov11`
 - **数据**：`data/jj_salon_room`（1080p RGB + GT depth mm + 标定）
 - **产物**：一律写 `tmp/`（不入库）；权重在 `pretrained/`

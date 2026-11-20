@@ -3,8 +3,8 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
-REMOTE_HOST="${REMOTE_HOST:-user@your-gpu-host}"
-REMOTE_PATH="${REMOTE_PATH:-/path/to/realtime_3dvision}"
+# shellcheck source=_load_remote.sh
+source "$(dirname "$0")/_load_remote.sh"
 
 # Default: sync code + configs. Use --all to also sync data/pretrained.
 MODE="${1:-code}"
@@ -18,6 +18,7 @@ RSYNC_EXCLUDES=(
   --exclude 'tmp/'
   --exclude 'runs/'
   --exclude 'wandb/'
+  --exclude '.remote_host'
 )
 
 case "$MODE" in

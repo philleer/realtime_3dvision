@@ -1,0 +1,7 @@
+# Local-only remote sync config. Copy to .remote_host and fill in.
+# .remote_host is gitignored — never commit real hosts or paths.
+
+# Local machine is a shadow copy; compute runs on the remote GPU host.
+REMOTE_HOST=user@your-gpu-host
+REMOTE_PATH=/path/to/realtime_3dvision
+ROLE=shadow

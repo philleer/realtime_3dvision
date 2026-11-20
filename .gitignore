@@ -13,3 +13,5 @@ __pycache__/
 *.bin
 *.ply
 third_party/
+# Local machine / remote host secrets — never commit
+.remote_host

@@ -3,8 +3,8 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
-REMOTE_HOST="${REMOTE_HOST:-user@your-gpu-host}"
-REMOTE_PATH="${REMOTE_PATH:-/path/to/realtime_3dvision}"
+# shellcheck source=_load_remote.sh
+source "$(dirname "$0")/_load_remote.sh"
 
 # Pull code + tmp inference artifacts by default; use --all for data/pretrained too.
 MODE="${1:-results}"
@@ -15,6 +15,7 @@ RSYNC_EXCLUDES=(
   --exclude '*.pyc'
   --exclude '.pytest_cache/'
   --exclude '.mypy_cache/'
+  --exclude '.remote_host'
 )
 
 case "$MODE" in
