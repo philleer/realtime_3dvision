@@ -2,7 +2,7 @@
 
 > 分支：`test-depth`（自 `master` / `test-detseg` 演进）  
 > 覆盖范围：仓库建立 → 检测分割 → 深度 → ONNX 评测 → 点云 / BEV → 后续可视化路线  
-> 文档日期：2026-11-17
+> 文档日期：2026-11-20（深度 V1/V2/V3 对比与管线默认 V2）
 
 ---
 
@@ -57,21 +57,59 @@
 
 ## 4. 深度估计选型
 
-| 方案 | 选型细节 | 结论 |
-|------|----------|------|
-| Depth Anything Base（HF） | `LiheYoung/depth-anything-base-hf` | **主路径**；官方 `.pth` 与 HF 键不兼容，统一走 HF |
-| 输入分辨率 | 模型侧约 **518×518**（/14 patch） | 与 YOLO 输入解耦，各自预处理 |
-| 输出语义 | HF `predicted_depth` 为 **disparity 风格**（越大越近） | 度量标定必须用 `scale/pred`，禁止 `pred*scale` |
-| GT 深度 | 数据集 depth png（mm） | 用于 metricize、评测与点云对照 |
+### 4.1 结论（先看这个）
 
-### 关键修复（点云地面挠曲）
+| 用途 | 选型 | 理由 |
+|------|------|------|
+| **管线默认 / 手机端部署** | Depth Anything **V2**（Base 做原型；端上优先 Small + 量化） | 精度够用；HF → ONNX 成熟；结构干净，工程成本低 |
+| **离线质检 / 高精度对照** | Depth Anything **V3**（`da3-base`） | 本数据上 vs-GT 明显最好，但导出与依赖更重 |
+| **回滚** | V1 | 仅兼容旧实验，不再作为主路径 |
+
+统一入口：`scripts/depth_backend.py`（`--depth-version {v2,v3,v1}` + `--depth-weights`）。
+
+### 4.2 候选与工程约束
+
+| 方案 | 权重 / 依赖 | 工程特点 |
+|------|-------------|----------|
+| **V1** | `LiheYoung/depth-anything-base-hf` | 旧主路径；HF API 与 V2 同形，可直接回滚 |
+| **V2 Base**（默认） | `depth-anything/Depth-Anything-V2-Base-hf` | Transformers 一等公民；`export_onnx.py` 已导出 `depth_anything_v2_base_518.onnx` |
+| **V3 Base**（可选） | `depth-anything/da3-base` + `pip install depth-anything-3` | DualDPT + 相机头等；非 Transformers 原生；当前未做 ONNX 导出 |
+| 输入分辨率 | V2 ≈ **518×518**（HF processor） | 与 YOLO 输入解耦，各自预处理 |
+| 输出语义 | V1/V2 多为 disparity 风格；V3 本实验呈 depth-like | 度量标定仍用 auto metricize（见 §4.4） |
+
+**为何管线选 V2 而非精度最高的 V3**
+
+1. **部署**：手机/边缘要延迟、包体、工具链；V2 有现成 ONNX，V3 结构更复杂、导出未打通。
+2. **体量档位**：V2-Small 缓存约百 MB 内可部署；`da3-base` 权重约 **517MB**，端侧不划算。
+3. **精度边际**：本场景 V2 相对 V1 已有稳定提升；V3 再涨一截更适合云端/离线，不阻塞主链路。
+4. **依赖**：V2 只依赖现有 `transformers`；V3 需独立包，弱网下权重下载也更脆弱。
+
+### 4.3 V1 / V2 / V3 对比实验（结果）
+
+- **脚本**：`scripts/compare_depth_versions.py`
+- **数据**：`data/jj_salon_room`，8 帧（`stride=50`），与 GT depth（mm）对齐后评测
+- **模型档位**：均为 Base（V1 HF base / V2-Base-hf / 本地 `da3-base`）
+- **metricize**：`corr(pred,gt)<0` → `scale/pred`（disp）；否则 `pred*scale`（depth）
+- **产物**：`tmp/depth_version_compare/`（面板 jpg、`compare_report.md/.json`、对比 mp4）
+
+| version | abs_rel↓ | rmse (m)↓ | mae (m)↓ | δ1↑ | align |
+|---------|----------|-----------|----------|-----|-------|
+| V1 | 0.192 | 0.738 | 0.360 | 0.771 | disp |
+| V2 | 0.177 | 0.734 | 0.338 | 0.796 | disp |
+| **V3** | **0.105** | **0.471** | **0.226** | **0.866** | depth |
+
+相对 V1：V2 abs_rel 约 **−8%**、δ1 **+2.5pt**；V3 abs_rel 约 **−45%**、δ1 **+9.5pt**、RMSE 约 **−36%**。
+
+视觉上（同帧面板）：V2 边缘/细结构优于 V1；V3 误差图最暗、细节最锐。V1/V2 输出与 GT 负相关（disparity）；V3 呈正相关（depth-like）。
+
+### 4.4 关键修复（点云地面挠曲）
 
 - **现象**：相对深度经 `median(gt/pred)*pred` 反投影后，地面随深度非线性弯曲。
-- **根因**：DA 输出与度量深度 **负相关**（corr ≈ −0.6～−0.9），当作深度做正比例缩放会拧曲几何。
+- **根因**：DA（尤其 V1/V2）输出与度量深度 **负相关**（corr ≈ −0.6～−0.9），当作深度做正比例缩放会拧曲几何。
 - **修复**：`corr(pred,gt)<0` 时采用 `metric = median(gt*pred) / pred`；地面平面残差约 **11 cm → 0.8 cm**。
-- **代码**：`scripts/depth_to_pointcloud.py`、`scripts/seg_to_bev.py`（commit `4a68f20`）。
+- **代码**：`scripts/depth_to_pointcloud.py`、`scripts/seg_to_bev.py`（commit `4a68f20`）；对比脚本同样使用 auto metricize。
 
-脚本：`test_depth_anything.py`、`viz_yolo_depth.py`（RGB | SEG | Depth 三栏 + 可选 MP4 / raw npy）。
+脚本：`test_depth_anything.py`、`viz_yolo_depth.py`（RGB | SEG | Depth 三栏 + 可选 MP4 / raw npy）；版本对比见 `compare_depth_versions.py`。
 
 ---
 
@@ -81,7 +119,7 @@
 
 - `scripts/export_onnx.py`
 - YOLO：`yolo26m-seg_736x1280.onnx`（与 PT letterbox 对齐）
-- Depth：`depth_anything_base_518.onnx`
+- Depth：`depth_anything_v2_base_518.onnx`（V2 Base；旧 `depth_anything_base_518.onnx` 为 V1）
 
 ### 5.2 对齐要点
 
@@ -179,8 +217,8 @@
 
 | 阶段 | 做法 | 目标 |
 |------|------|------|
-| **P0（现有 YOLO+Depth 上）** | mask 反投影 → **BEV 格点 class_id 多数投票填色** → 叠加 **footprint 多边形或 OBB + 类别标签** | 性价比最高，接近论文/工业俯视图 |
-| **P1** | 稠密语义 BEV 头或占用头（可用现有点云伪标签 / GT depth 监督） | 观感与可融合性上台阶 |
+| **P0（`test-depth` 已实现，未合入 develop）** | `scripts/seg_to_bev_occ.py`：mask 反投影 → **BEV 格点 class majority vote** → **凸包轮廓 + min-area OBB + 类别标签**；产物 `tmp/seg_bev_occ/` | 性价比最高；合入 develop 前先在本分支验证 |
+| **P1** | 稠密语义 BEV 头或 3D 语义占用体素（可用现有点云伪标签 / GT depth 监督） | 观感与可融合性上台阶 |
 | **P2** | 多帧 `T_world_cam` 融合占用 + 3DGS | 房间级一致地图 |
 
 **不推荐**作为终态演示：仅投影 `plot()` 颜色点，或仅 2D 框四角抬到 BEV（角点深度不稳）。
@@ -211,18 +249,24 @@
 scripts/
   test_yolo_detseg.py          # YOLO26-SEG 冒烟
   test_detr_seg.py             # DETR-Seg 对比（历史）
-  test_depth_anything.py       # Depth Anything 冒烟
+  depth_backend.py             # Depth Anything V2/V3 统一加载与推理
+  test_depth_anything.py       # Depth Anything V2/V3 冒烟
+  compare_depth_versions.py    # V1/V2/V3 同帧对比 + vs-GT 指标
   viz_yolo_depth.py            # RGB|SEG|Depth 联合可视化 / 视频
   viz_rgbd_video.py            # RGB-D 视频
-  export_onnx.py               # YOLO / Depth → ONNX
+  export_onnx.py               # YOLO / Depth V2 → ONNX
+  dump_depth_pt.py             # 全序列深度 npy 导出（V2/V3）
+  dump_depth_onnx.py           # ONNX 深度导出（默认 V2）
   bench_detseg_depth.py        # PT 延迟 + 利用率
   bench_onnx_detseg_depth.py   # ONNX 延迟 + 利用率
   depth_to_pointcloud.py       # 深度 → PLY（cam=world）
-  seg_to_bev.py                # 分割+深度 → 俯视 BEV
+  seg_to_bev.py                # 分割+深度 → 俯视 BEV（颜色点投影）
+  # seg_to_bev_occ.py         # 稠密 BEV 语义 majority + OBB（仍在 test-depth）
   host/sync_*.sh               # 本机 ↔ 远端同步
 
 tmp/                           # 全部实验产物（不入库）
 docs/technical_report.md       # 本文档
+README.md                      # 模块与 pipeline 总览
 ```
 
 ### 关键 commit 轨迹（`test-depth`）
@@ -244,8 +288,9 @@ docs/technical_report.md       # 本文档
 
 **已落地**
 
-- YOLO26-SEG + Depth Anything 主链路，ONNX 联合约 **12 FPS** 量级（评测机）
-- 点云 / BEV 单帧相机系可用；DA 度量标定按 disparity 处理
+- YOLO26-SEG + **Depth Anything V2** 主链路（V1 回滚、V3 可选）；ONNX 联合约 **12 FPS** 量级（评测机）
+- V1/V2/V3 Base 同帧对比完成：精度 **V3 > V2 > V1**；部署默认 V2（见 §4）
+- 点云 / BEV 单帧相机系可用；V1/V2 度量标定按 disparity，V3 本数据呈 depth-like
 - 数据自带 keyframe 位姿与房间点云 `room.ply`
 
 **建议下一步（按可视化收益）**
@@ -260,6 +305,7 @@ docs/technical_report.md       # 本文档
 ## 12. 参考
 
 - 数据集：[pollen-robotics/SLAM_JJ_Salon_with_GT](https://huggingface.co/datasets/pollen-robotics/SLAM_JJ_Salon_with_GT)
-- Depth Anything / HF Depth Estimation
+- Depth Anything / HF Depth Estimation；V3：`depth-anything-3` / `da3-base`
 - BEV / Occupancy 综述方向：BEVFormer、OccNet、SurroundOcc、OccFormer；工业演示常见语义占用 + BEV 框叠加
 - 本地评测报告：`tmp/bench_detseg_depth/bench_report.md`、`tmp/bench_onnx_detseg_depth/bench_report.md`
+- 深度版本对比：`tmp/depth_version_compare/compare_report.md`（面板与 mp4 同目录）

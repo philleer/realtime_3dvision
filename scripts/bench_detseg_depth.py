@@ -13,11 +13,15 @@ import time
 from dataclasses import dataclass, field
 from pathlib import Path
 
+import sys
+
 import cv2
 import numpy as np
 import psutil
 import torch
-from PIL import Image
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from depth_backend import add_depth_model_args, load_depth_backend  # noqa: E402
 
 
 @dataclass
@@ -120,7 +124,7 @@ def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(description="Seg / depth / joint latency benchmark")
     p.add_argument("--source", type=Path, default=root / "data" / "jj_salon_room" / "rgb")
     p.add_argument("--yolo-weights", type=Path, default=root / "pretrained" / "yolo26m-seg.pt")
-    p.add_argument("--depth-weights", type=str, default="LiheYoung/depth-anything-base-hf")
+    add_depth_model_args(p, default_version="v2")
     p.add_argument("--outdir", type=Path, default=root / "tmp" / "bench_detseg_depth")
     p.add_argument("--num-frames", type=int, default=50)
     p.add_argument("--stride", type=int, default=10)
@@ -263,18 +267,15 @@ def run_seg_only(model, images: list[np.ndarray], args, gpu_index: int) -> Sampl
     return stats
 
 
-def run_depth_only(model, processor, images: list[np.ndarray], device: torch.device, warmup: int, gpu_index: int) -> SampleStats:
-    stats = SampleStats("depth_only_depth_anything_base", n_frames=len(images), warmup=warmup)
-
-    def infer_one(bgr: np.ndarray) -> None:
-        rgb = Image.fromarray(cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB))
-        inputs = processor(images=rgb, return_tensors="pt")
-        inputs = {k: v.to(device) for k, v in inputs.items()}
-        with torch.inference_mode():
-            _ = model(**inputs)
+def run_depth_only(backend, images: list[np.ndarray], warmup: int, gpu_index: int) -> SampleStats:
+    stats = SampleStats(
+        f"depth_only_depth_anything_{backend.version}",
+        n_frames=len(images),
+        warmup=warmup,
+    )
 
     for im in images[:warmup]:
-        infer_one(im)
+        _ = backend.predict(im)
     sync_cuda()
 
     mon = ResourceMonitor(gpu_index)
@@ -282,7 +283,7 @@ def run_depth_only(model, processor, images: list[np.ndarray], device: torch.dev
     for im in images:
         sync_cuda()
         t0 = time.perf_counter()
-        infer_one(im)
+        _ = backend.predict(im)
         sync_cuda()
         stats.latency_ms.append((time.perf_counter() - t0) * 1000.0)
     samples = mon.stop()
@@ -293,16 +294,12 @@ def run_depth_only(model, processor, images: list[np.ndarray], device: torch.dev
     return stats
 
 
-def run_joint(yolo, depth_model, processor, images: list[np.ndarray], args, device: torch.device, gpu_index: int) -> SampleStats:
+def run_joint(yolo, backend, images: list[np.ndarray], args, gpu_index: int) -> SampleStats:
     stats = SampleStats("joint_seg_then_depth", n_frames=len(images), warmup=args.warmup)
 
     def infer_one(bgr: np.ndarray) -> None:
         yolo.predict(bgr, imgsz=args.imgsz, conf=args.conf, iou=args.iou, device=args.device, verbose=False)
-        rgb = Image.fromarray(cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB))
-        inputs = processor(images=rgb, return_tensors="pt")
-        inputs = {k: v.to(device) for k, v in inputs.items()}
-        with torch.inference_mode():
-            _ = depth_model(**inputs)
+        _ = backend.predict(bgr)
 
     for im in images[: args.warmup]:
         infer_one(im)
@@ -369,28 +366,31 @@ def main() -> None:
             "conf": args.conf,
             "iou": args.iou,
         },
-        "depth": {"weights": args.depth_weights},
+        "depth": {
+            "version": args.depth_version,
+            "weights": args.depth_weights,
+        },
     }
 
     from ultralytics import YOLO
-    from transformers import AutoImageProcessor, AutoModelForDepthEstimation
 
     print("[bench] loading YOLO...", flush=True)
     yolo = YOLO(str(args.yolo_weights))
-    print("[bench] loading Depth Anything...", flush=True)
-    processor = AutoImageProcessor.from_pretrained(args.depth_weights)
-    depth_model = AutoModelForDepthEstimation.from_pretrained(args.depth_weights).to(device).eval()
+    print(f"[bench] loading Depth Anything {args.depth_version}...", flush=True)
+    depth_backend = load_depth_backend(args.depth_version, args.depth_weights, device)
+    env["depth"]["weights"] = depth_backend.weights
+    env["depth"]["version"] = depth_backend.version
 
     print("[bench] (1) seg only", flush=True)
     seg = run_seg_only(yolo, images, args, gpu_index)
     torch.cuda.empty_cache()
 
     print("[bench] (2) depth only", flush=True)
-    depth = run_depth_only(depth_model, processor, images, device, args.warmup, gpu_index)
+    depth = run_depth_only(depth_backend, images, args.warmup, gpu_index)
     torch.cuda.empty_cache()
 
     print("[bench] (3) joint seg+depth", flush=True)
-    joint = run_joint(yolo, depth_model, processor, images, args, device, gpu_index)
+    joint = run_joint(yolo, depth_backend, images, args, gpu_index)
 
     report = {
         "env": env,

@@ -5,23 +5,24 @@ from __future__ import annotations
 
 import argparse
 import os
+import sys
 from pathlib import Path
 
 import cv2
 import numpy as np
 import torch
-from PIL import Image
-from transformers import AutoImageProcessor, AutoModelForDepthEstimation
 from ultralytics import YOLO
 
-DEFAULT_DEPTH_HF = "LiheYoung/depth-anything-base-hf"
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from class_palette import instances_from_yolo, paint_instances  # noqa: E402
+from depth_backend import add_depth_model_args, load_depth_backend  # noqa: E402
 
 
 def parse_args() -> argparse.Namespace:
     root = Path(__file__).resolve().parents[1]
-    p = argparse.ArgumentParser(description="Aligned YOLO-seg + depth visualization")
+    p = argparse.ArgumentParser(description="Aligned YOLO-seg + Depth Anything V2/V3 visualization")
     p.add_argument("--yolo-weights", type=Path, default=root / "pretrained" / "yolo26m-seg.pt")
-    p.add_argument("--depth-weights", type=str, default=DEFAULT_DEPTH_HF)
+    add_depth_model_args(p, default_version="v2")
     p.add_argument("--source", type=Path, default=root / "data" / "jj_salon_room" / "rgb")
     p.add_argument("--outdir", type=Path, default=root / "tmp" / "yolo_depth")
     p.add_argument("--num-frames", type=int, default=8, help="<=0 means all frames")
@@ -113,27 +114,6 @@ def make_aligned_panel(
     return np.concatenate([panels[0], gap, panels[1], gap, panels[2]], axis=1)
 
 
-@torch.inference_mode()
-def predict_depth(
-    model: AutoModelForDepthEstimation,
-    processor: AutoImageProcessor,
-    bgr: np.ndarray,
-    device: torch.device,
-) -> np.ndarray:
-    h, w = bgr.shape[:2]
-    rgb = Image.fromarray(cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB))
-    inputs = processor(images=rgb, return_tensors="pt")
-    inputs = {k: v.to(device) for k, v in inputs.items()}
-    pred = model(**inputs).predicted_depth
-    pred = torch.nn.functional.interpolate(
-        pred.unsqueeze(1),
-        size=(h, w),
-        mode="bilinear",
-        align_corners=False,
-    )[0, 0]
-    return pred.float().cpu().numpy()
-
-
 def main() -> None:
     os.environ.setdefault("HF_ENDPOINT", "https://hf-mirror.com")
     os.environ.setdefault("HF_HUB_DISABLE_XET", "1")
@@ -154,25 +134,17 @@ def main() -> None:
     )
     video_path = (args.video or (outdir / "yolo_depth.mp4")).resolve() if write_video else None
 
-    gpu_index = str(args.device)
-    depth_device = torch.device(
-        f"cuda:{gpu_index}" if gpu_index.isdigit() and torch.cuda.is_available() else args.device
-    )
-    if not torch.cuda.is_available():
-        depth_device = torch.device("cpu")
-
     print(f"[yolo-depth] yolo={args.yolo_weights}")
-    print(f"[yolo-depth] depth={args.depth_weights}")
-    print(f"[yolo-depth] device={args.device} depth_device={depth_device} imgsz={args.imgsz}")
+    print(f"[yolo-depth] depth_version={args.depth_version} depth_weights={args.depth_weights}")
+    print(f"[yolo-depth] device={args.device} imgsz={args.imgsz}")
     print(
         f"[yolo-depth] frames={len(images)} save_frames={save_frames} "
         f"video={video_path} fps={args.fps} -> {outdir}"
     )
 
     yolo = YOLO(str(args.yolo_weights))
-    processor = AutoImageProcessor.from_pretrained(args.depth_weights)
-    depth_model = AutoModelForDepthEstimation.from_pretrained(args.depth_weights)
-    depth_model.to(depth_device).eval()
+    depth_backend = load_depth_backend(args.depth_version, args.depth_weights, args.device)
+    print(f"[yolo-depth] depth loaded: {depth_backend.version} @ {depth_backend.weights}")
 
     writer: cv2.VideoWriter | None = None
     for i, path in enumerate(images, 1):
@@ -192,12 +164,15 @@ def main() -> None:
             retina_masks=True,
             verbose=False,
         )[0]
-        seg_bgr = yres.plot()
+        hh, ww = bgr.shape[:2]
+        seg_bgr = paint_instances(
+            bgr, instances_from_yolo(yres, hh, ww), alpha=0.55, draw_boxes=True, draw_labels=True
+        )
         n_box = 0 if yres.boxes is None else len(yres.boxes)
         n_mask = 0 if yres.masks is None else len(yres.masks)
 
-        # 2) Depth -> upsample to original HxW (same alignment canvas as YOLO plot)
-        depth = predict_depth(depth_model, processor, bgr, depth_device)
+        # 2) Depth -> original HxW
+        depth = depth_backend.predict(bgr)
 
         panel = make_aligned_panel(bgr, seg_bgr, depth)
         if args.panel_scale != 1.0:

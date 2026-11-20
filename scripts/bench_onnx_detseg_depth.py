@@ -126,7 +126,7 @@ def parse_args() -> argparse.Namespace:
     p.add_argument(
         "--depth-onnx",
         type=Path,
-        default=root / "pretrained" / "depth_anything_base_518.onnx",
+        default=root / "pretrained" / "depth_anything_v2_base_518.onnx",
     )
     p.add_argument("--outdir", type=Path, default=root / "tmp" / "bench_onnx_detseg_depth")
     p.add_argument("--num-frames", type=int, default=50)

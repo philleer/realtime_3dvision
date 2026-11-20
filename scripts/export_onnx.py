@@ -16,8 +16,14 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--yolo-weights", type=Path, default=root / "pretrained" / "yolo26m-seg.pt")
     p.add_argument("--yolo-imgsz", type=int, nargs="+", default=[736, 1280],
                         help="YOLO export size: one int (square) or H W")
-    p.add_argument("--depth-weights", type=str, default="LiheYoung/depth-anything-base-hf")
+    p.add_argument(
+        "--depth-weights",
+        type=str,
+        default="depth-anything/Depth-Anything-V2-Base-hf",
+        help="HF Depth Anything V2 id (V3 is not ONNX-exported here)",
+    )
     p.add_argument("--depth-size", type=int, default=518, help="Depth Anything input HxW (square)")
+    p.add_argument("--depth-tag", type=str, default="v2_base", help="Output filename tag")
     p.add_argument("--outdir", type=Path, default=root / "pretrained")
     p.add_argument("--opset", type=int, default=17)
     p.add_argument("--skip-yolo", action="store_true")
@@ -51,7 +57,7 @@ def export_yolo(weights: Path, outdir: Path, imgsz, opset: int) -> Path:
     return dst
 
 
-def export_depth(weights: str, outdir: Path, size: int, opset: int) -> Path:
+def export_depth(weights: str, outdir: Path, size: int, opset: int, tag: str) -> Path:
     from transformers import AutoImageProcessor, AutoModelForDepthEstimation
 
     outdir.mkdir(parents=True, exist_ok=True)
@@ -68,7 +74,7 @@ def export_depth(weights: str, outdir: Path, size: int, opset: int) -> Path:
 
     wrapped = DepthWrapper(model)
     dummy = torch.randn(1, 3, size, size, dtype=torch.float32)
-    dst = outdir / f"depth_anything_base_{size}.onnx"
+    dst = outdir / f"depth_anything_{tag}_{size}.onnx"
 
     torch.onnx.export(
         wrapped,
@@ -80,12 +86,12 @@ def export_depth(weights: str, outdir: Path, size: int, opset: int) -> Path:
         do_constant_folding=True,
         dynamo=False,
     )
-    # save processor config hint
-    meta = outdir / f"depth_anything_base_{size}.json"
+    meta = outdir / f"depth_anything_{tag}_{size}.json"
     meta.write_text(
         (
             "{\n"
             f'  "source": "{weights}",\n'
+            f'  "tag": "{tag}",\n'
             f'  "input_size": [{size}, {size}],\n'
             f'  "opset": {opset},\n'
             f'  "mean": {getattr(processor, "image_mean", None)},\n'
@@ -105,7 +111,7 @@ def main() -> None:
     if not args.skip_yolo:
         export_yolo(args.yolo_weights, args.outdir, args.yolo_imgsz, args.opset)
     if not args.skip_depth:
-        export_depth(args.depth_weights, args.outdir, args.depth_size, args.opset)
+        export_depth(args.depth_weights, args.outdir, args.depth_size, args.opset, args.depth_tag)
     print("[export] done")
 
 

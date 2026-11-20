@@ -10,13 +10,16 @@
 
 # Part 1 — 技术问题
 
-## T1. 官方 Depth Anything `.pth` 与 HF 权重键不兼容
+## T1. 官方 Depth Anything `.pth` 与 HF 权重键不兼容 / 版本升级
 
 **Problem**  
-本地 `depth_anything_vitb14.pth`（原仓库格式）无法直接灌入 Transformers HF 模型，state dict 键不匹配。
+本地 `depth_anything_vitb14.pth`（原仓库格式）无法直接灌入 Transformers HF 模型；后续需升级到 V2/V3。
 
 **Solution**  
-统一使用 HF：`LiheYoung/depth-anything-base-hf`（或对应本地 HF 目录），不混用官方 `.pth`。
+- **默认 V2**：`depth-anything/Depth-Anything-V2-Base-hf`（Transformers `AutoModelForDepthEstimation`）  
+- **可选 V3**：`pip install depth-anything-3`，权重 `depth-anything/da3-base`（下载约数百 MB，弱网易断）  
+- 统一入口：`scripts/depth_backend.py`（`--depth-version v2|v3|v1`）  
+- 不再混用官方 V1 `.pth` 直接灌 HF 结构
 
 ---
 

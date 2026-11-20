@@ -1,32 +1,24 @@
 #!/usr/bin/env python3
-"""Depth Anything (ViT-B/14) monocular depth smoke test on demo RGB frames."""
+"""Depth Anything V2/V3 monocular depth smoke test on demo RGB frames."""
 
 from __future__ import annotations
 
 import argparse
 import os
+import sys
 from pathlib import Path
 
 import cv2
 import numpy as np
-import torch
-from PIL import Image
-from transformers import AutoImageProcessor, AutoModelForDepthEstimation
 
-
-# HF equivalent of official depth_anything_vitb14.pth
-DEFAULT_HF_ID = "LiheYoung/depth-anything-base-hf"
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from depth_backend import add_depth_model_args, load_depth_backend  # noqa: E402
 
 
 def parse_args() -> argparse.Namespace:
     root = Path(__file__).resolve().parents[1]
-    p = argparse.ArgumentParser(description="Depth Anything depth estimation test")
-    p.add_argument(
-        "--weights",
-        type=str,
-        default=DEFAULT_HF_ID,
-        help="HF model id/dir (ViT-B). Local depth_anything_vitb14.pth is original-repo format; use HF base.",
-    )
+    p = argparse.ArgumentParser(description="Depth Anything V2/V3 depth estimation test")
+    add_depth_model_args(p, default_version="v2")
     p.add_argument(
         "--source",
         type=Path,
@@ -79,52 +71,21 @@ def colorize_depth(depth: np.ndarray) -> np.ndarray:
     return cv2.applyColorMap(u8, cv2.COLORMAP_INFERNO)
 
 
-def make_panel(rgb_bgr: np.ndarray, depth_color: np.ndarray) -> np.ndarray:
+def make_panel(rgb_bgr: np.ndarray, depth_color: np.ndarray, title: str) -> np.ndarray:
     h, w = rgb_bgr.shape[:2]
     depth_resized = cv2.resize(depth_color, (w, h), interpolation=cv2.INTER_LINEAR)
     gap = np.full((h, 16, 3), 255, dtype=np.uint8)
     panel = np.concatenate([rgb_bgr, gap, depth_resized], axis=1)
     cv2.putText(panel, "RGB", (20, 40), cv2.FONT_HERSHEY_SIMPLEX, 1.2, (255, 255, 255), 2)
-    cv2.putText(
-        panel,
-        "Depth Anything",
-        (w + 36, 40),
-        cv2.FONT_HERSHEY_SIMPLEX,
-        1.2,
-        (255, 255, 255),
-        2,
-    )
+    cv2.putText(panel, title, (w + 36, 40), cv2.FONT_HERSHEY_SIMPLEX, 1.2, (255, 255, 255), 2)
     return panel
 
 
-@torch.inference_mode()
-def predict_depth(
-    model: AutoModelForDepthEstimation,
-    processor: AutoImageProcessor,
-    image_rgb: Image.Image,
-    device: torch.device,
-) -> np.ndarray:
-    inputs = processor(images=image_rgb, return_tensors="pt")
-    inputs = {k: v.to(device) for k, v in inputs.items()}
-    outputs = model(**inputs)
-    # HF DepthAnything returns predicted_depth at model input resolution
-    pred = outputs.predicted_depth
-    h, w = image_rgb.size[1], image_rgb.size[0]
-    pred = torch.nn.functional.interpolate(
-        pred.unsqueeze(1),
-        size=(h, w),
-        mode="bilinear",
-        align_corners=False,
-    )[0, 0]
-    return pred.float().cpu().numpy()
-
-
 def main() -> None:
-    # Prefer China HF mirror when unset (same as other repo downloads).
     os.environ.setdefault("HF_ENDPOINT", "https://hf-mirror.com")
+    os.environ.setdefault("HF_HUB_DISABLE_XET", "1")
 
     args = parse_args()
-    device = torch.device(args.device if torch.cuda.is_available() else "cpu")
     images = collect_images(args.source, args.num_frames, args.stride)
     outdir = args.outdir.resolve()
     outdir.mkdir(parents=True, exist_ok=True)
@@ -132,21 +93,18 @@ def main() -> None:
     if args.save_raw:
         raw_dir.mkdir(parents=True, exist_ok=True)
 
-    print(f"[depth] weights={args.weights}")
-    print(f"[depth] device={device}")
+    backend = load_depth_backend(args.depth_version, args.depth_weights, args.device)
+    title = f"Depth Anything {backend.version.upper()}"
+    print(f"[depth] version={backend.version} weights={backend.weights}")
+    print(f"[depth] device={backend.device}")
     print(f"[depth] frames={len(images)} -> {outdir}")
-
-    processor = AutoImageProcessor.from_pretrained(args.weights)
-    model = AutoModelForDepthEstimation.from_pretrained(args.weights)
-    model.to(device).eval()
 
     for i, path in enumerate(images, 1):
         bgr = cv2.imread(str(path), cv2.IMREAD_COLOR)
         if bgr is None:
             raise RuntimeError(f"failed to read {path}")
-        rgb = Image.fromarray(cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB))
-        depth = predict_depth(model, processor, rgb, device)
-        panel = make_panel(bgr, colorize_depth(depth))
+        depth = backend.predict(bgr)
+        panel = make_panel(bgr, colorize_depth(depth), title)
         cv2.imwrite(str(outdir / path.name), panel)
         if args.save_raw:
             np.save(raw_dir / f"{path.stem}.npy", depth.astype(np.float16))
